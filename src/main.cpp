@@ -153,8 +153,8 @@ void loop() {
 
 }
 int calculate_power(int voltage, int state_i){
-    // Calculates the power by multiplying the current resistance of the board by the measured voltage
-    return (voltage * state_i);
+    // Calculates the electrical power from a voltage and a resistance, by Using the Formula P = U*I where I = U/R
+    return (voltage * voltage / state_i);
 }
 
 int count_up(int state_i) {
