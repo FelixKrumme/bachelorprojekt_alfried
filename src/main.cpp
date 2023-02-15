@@ -18,10 +18,13 @@
 #define MOSFET7 8
 #define MOSFET8 9
 
-// Variables for windspeed measurement
-#define CALC_INTERVAL 1000
+// Timing for Windssensor
+#define CALC_INTERVAL_SENSOR 1000
+// Timing for Hill-Climbing
+#define CALC_INTERVAL_RESISTOR 10
 
-unsigned long nextCalc;
+unsigned long nextCalcSensor;
+unsigned long nextCalcResistance;
 unsigned long timer;
 
 // Variables for comparing and saving voltages
@@ -58,7 +61,8 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(ANEMOMETER_PIN), adsWeather.countAnemometer,
                     FALLING); //.countAnemometer is the ISR for the anemometer.
 
-    nextCalc = millis() + CALC_INTERVAL;
+    nextCalcSensor = millis() + CALC_INTERVAL_SENSOR;
+
     // Look if the SD-Card is reachable
     if (!SD.begin(SDCARD_SS_PIN)) {
         pinMode(1, OUTPUT);
@@ -97,37 +101,41 @@ void loop() {
 
     String dataString = "";
 
-    // Update Sensor Values.
+    // Update Sensor Values, call as often as possible.
     adsWeather.update();
 
-    // Calculate the current generated Power, with the current state and the new measured voltage.
-    new_power = calculate_power(analogRead(MEASUREMENT_PIN), state);
+    //
+    if(timer > nextCalcResistance) {
+        // Calculate the next time to change the Resistor Cascade
+        nextCalcResistance = timer + CALC_INTERVAL_RESISTOR;
+        // Calculate the current generated Power, with the current state and the new measured voltage.
+        new_power = calculate_power(analogRead(MEASUREMENT_PIN), state);
 
-    // Hill-Climbing Decision
-    if(new_power > old_power) {
-        if(rising_res_cycle){
-            state = count_down(state);
-        } else{
-            state = count_up(state);
+        // Hill-Climbing Decision
+        if(new_power > old_power) {
+            if(rising_res_cycle){
+                state = count_down(state);
+            } else{
+                state = count_up(state);
+            }
+        } else if(new_power < old_power) {
+            if (rising_res_cycle) {
+                state = count_up(state);
+            } else {
+                state = count_down(state);
+            }
+            rising_res_cycle = (!rising_res_cycle);
         }
-    } else if(new_power < old_power) {
-        if (rising_res_cycle) {
-            state = count_up(state);
-        } else {
-            state = count_down(state);
-        }
-        rising_res_cycle = (!rising_res_cycle);
+
+        // Switch the Output Pins leading to the MOSFETs accordingly
+        switch_transistors(state);
+        // Save the current power for the next iteration
+        old_power = new_power;
     }
 
-    // Switch the Output Pins leading to the MOSFETs accordingly
-    switch_transistors(state);
-    // Save the current power for the next iteration
-    old_power = new_power;
-
-    //Loop for Windmeasurement
-    if (timer > nextCalc) {
+    if (timer > nextCalcSensor) {
         // Calc the next time to measure again
-        nextCalc = timer + CALC_INTERVAL;
+        nextCalcSensor = timer + CALC_INTERVAL_SENSOR;
 
         // Get the Windinfos
         windSpeed = adsWeather.getWindSpeed();
