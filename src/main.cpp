@@ -6,9 +6,9 @@
 #include <bitset>
 
 // Activate Serial Output over USB
-#define DEBUGGING
+// #define DEBUGGING
 
-
+//Ax Pins for using the Wind Measurement, Digtal Pins for controlling the MOSFETS (via the Logic Level Shifter)
 #define ANEMOMETER_PIN A0
 #define VANE_PIN A1
 #define MEASUREMENT_PIN A2
@@ -21,22 +21,26 @@
 #define MOSFET7 8
 #define MOSFET8 9
 
-// Timing for Windssensor
+// Possible Options depending where the Jumper is placed 1; .27; .132; .055
+#define VOLTAGE_DIVIDER 1
+
+// Timeframe (ms) for Wind-sensor calculation and writing to the SD-Card
 #define CALC_INTERVAL_SENSOR 1000
-// Timing for Hill-Climbing
+// Timeframe (ms) for the Hill-Climbing Algorithm thus the change of resistance
 #define CALC_INTERVAL_RESISTOR 100
 
+// Variables for the Timeframe Calculations
 unsigned long nextCalcSensor;
 unsigned long nextCalcResistance;
 unsigned long timer;
 
-// Variables for comparing and saving voltages
+// Variables for comparing and saving generated power
 double old_power;
 double new_power;
 
-// Variables for controlling the MOSFETs State to determine which MOSFETS are on,
-// rising cyclye to determine if the loop is in an ascending run or descending.
-//  MOSFETPINS for correct Mapping
+// Variable to map from a State to the current resistance and to determine which MOSFETs are on
+// rising_res_cycle to determine if the Hill-Climb is climbing or descending
+//  MOSFETPINS for correct Mapping to Outputs
 int state;
 bool rising_res_cycle;
 const char MOSFETPINS[8] = {MOSFET1, MOSFET2, MOSFET3, MOSFET4, MOSFET5, MOSFET6, MOSFET7, MOSFET8};
@@ -60,20 +64,15 @@ int count_down(int state_i);
 
 void switch_transistors(int state_i);
 
-
+// Initialize the Class for the Weather Station
 ADSWeather adsWeather(VANE_PIN, ANEMOMETER_PIN);
-
 
 void setup() {
     // Use a Higher Resolution for the ADCs (8 would be standard)
     analogReadResolution(12);
-
-    // Interrupt for Windspeed Measurement
+    // Interrupt for Wind speed Measurement
     attachInterrupt(digitalPinToInterrupt(ANEMOMETER_PIN), adsWeather.countAnemometer,
                     FALLING); //.countAnemometer is the ISR for the anemometer.
-
-    nextCalcSensor = millis() + CALC_INTERVAL_SENSOR;
-
     // Look if the SD-Card is reachable
     if (!SD.begin(SDCARD_SS_PIN)) {
         pinMode(1, OUTPUT);
@@ -85,6 +84,7 @@ void setup() {
             dataFile.close();
         }
     }
+    // Initialize Output Pins
     pinMode(MOSFET1, OUTPUT);
     pinMode(MOSFET2, OUTPUT);
     pinMode(MOSFET3, OUTPUT);
@@ -94,15 +94,15 @@ void setup() {
     pinMode(MOSFET7, OUTPUT);
     pinMode(MOSFET8, OUTPUT);
     pinMode(MEASUREMENT_PIN, INPUT);
-
+    // Starting value for the Hill Climb, (255 equals lowest possible resistance, thus we try to climb)
     state = 255;
     rising_res_cycle = true;
-
-    rtc.begin(); // initialize RTC
-    // Set the time
+    // initialize RTC, set Time and Date
+    rtc.begin();
     rtc.setTime(hours, minutes, seconds);
-    // Set the date
     rtc.setDate(day, month, year);
+    // Calculate the next time to write to the SD-Card and calculate Wind-Speed
+    nextCalcSensor = millis() + CALC_INTERVAL_SENSOR;
 
 #ifdef DEBUGGING
     Serial.begin(9600);
@@ -116,22 +116,19 @@ void loop() {
     long windSpeed;
     int windGust;
 
-    String dataString = "";
-
+    String dataString = ""; // For Outputting
 
     // Update Sensor Values, call as often as possible.
     adsWeather.update();
 
-    //
-
     if (timer > nextCalcResistance) {
-        // Calculate the next time to change the Resistor Cascade
+        // Calculate the next time to change the Resistor Cascade.
         nextCalcResistance = timer + CALC_INTERVAL_RESISTOR;
         // Calculate the current generated Power, with the current state and the new measured voltage.
         double volt = analogRead(MEASUREMENT_PIN) * 3.3 / 4095;
         new_power = calculate_power(volt, state);
 
-        // Hill-Climbing Decision
+        // Hill-Climbing Decision, if the previous climb/fall was useful continue, else turn in the other direction.
         if (new_power > old_power) {
             if (rising_res_cycle) {
                 state = count_down(state);
@@ -147,9 +144,9 @@ void loop() {
             rising_res_cycle = (!rising_res_cycle);
         }
 
-        // Switch the Output Pins leading to the MOSFETs accordingly
+        // Switch the MOSFETs according to the previous made decision.
         switch_transistors(state);
-        // Save the current power for the next iteration
+        // Save the current power for the next decision in the next iteration.
         old_power = new_power;
     }
 
@@ -161,14 +158,13 @@ void loop() {
         windSpeed = adsWeather.getWindSpeed();
         windDirection = adsWeather.getWindDirection();
         windGust = adsWeather.getWindGust();
-
-        // Generate one string to be written to SD-Card
+        // Calculate voltage.
         double voltage = analogRead(MEASUREMENT_PIN) * 3.3 / 4095;
+        // Generate one string to be written to SD-Card
         dataString +=
                 String(windSpeed) + "," + String(windGust) + "," + String(windDirection) + "," + new_power +
                 "," + String(state) + "," + voltage + "," + rtc.getMonth() + "/" + rtc.getDay() + "," + rtc.getHours() +
                 ":" + rtc.getMinutes() + ":" + rtc.getSeconds();
-
         // Open the File and Write to it
         File dataFile = SD.open("datalog.txt", FILE_WRITE);
         if (dataFile) {
@@ -184,9 +180,12 @@ void loop() {
 }
 
 double calculate_power(double voltage, int state_i) {
+    /** Calculates the power corresponding to the given voltage with the resistance given by a State. Therefore first
+     * calculates the corresponding Resistance. (a MOSFET has a Resistance of arround 20mOhms if turned on). **/
     double resistance = 0;
+    voltage = voltage / VOLTAGE_DIVIDER;
     std::bitset<8> bin_x(state_i);
-    // Calculate Resistance by transforming int to binary multply one by res og a mosfet and 0 by the according resistor
+    // If i is one the resistance of the MOSFET is taken else the resistance of the corresponding resistor given by 2^i.
     for (int i = 0; i < 8; i++) {
         if (bin_x[0] == 1) {
             resistance += 0.02;
@@ -195,12 +194,11 @@ double calculate_power(double voltage, int state_i) {
         }
         bin_x >>= 1;
     }
-    // Calculates the electrical power from a voltage and a resistance, by Using the Formula P = U*I where I = U/R
     return (pow(voltage, 2) / resistance);
 }
 
 int count_up(int state_i) {
-    //Increase the State as long as it's less than 255
+    /** Increase the State state_i by one as long as it's less than 255. **/
     if (state_i == 255) {
         return 255;
     }
@@ -208,7 +206,7 @@ int count_up(int state_i) {
 }
 
 int count_down(int state_i) {
-    //Decrease the State as long as it's greater than zero
+    /** Decrease the State state_i by one as long as it's greater than 0. **/
     if (state_i == 0) {
         return 0;
     }
@@ -216,7 +214,8 @@ int count_down(int state_i) {
 }
 
 void switch_transistors(int state_i) {
-    //Calculate the binary of the State and switch the Mosfets accordingly (255 all on, 254 all on but the first off...)
+    /** Switch the MOSFETs according to the State state_i, for state_i = 0 all MOSFETs should be off thus biggest
+     * resistance possible, for state_i = 255 all should be on thus lowest resistance possible. **/
     std::bitset<8> bin_x(state_i);
     for (int i = 0; i < 8; i++) {
         if (bin_x[i] == 1) {
